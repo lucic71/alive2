@@ -3656,8 +3656,11 @@ StateValue GEP::toSMT(State &s) const {
     Pointer ptr(s.getMemory(), ptrval.value);
     AndExpr non_poison(ptrval.non_poison);
 
+    AndExpr inbounds_np;
+    AndExpr idx_all_zeros;
+
     if (inbounds)
-      non_poison.add(ptr.inbounds(true));
+      inbounds_np.add(ptr.inbounds());
 
     for (auto &[sz, idx] : offsets) {
       auto &[v, np] = idx;
