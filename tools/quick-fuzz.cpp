@@ -1000,7 +1000,7 @@ reduced using llvm-reduce.
     // and then we always fail Alive's syntactic equality check. so we
     // just go ahead and (soundly) drop them by hand.
     F2->removeFnAttr(Attribute::NoFree);
-    F2->removeFnAttr(Attribute::Memory);
+    //F2->removeFnAttr(Attribute::Memory);
     F2->removeFnAttr(Attribute::WillReturn);
 
     if (!verifier.compareFunctions(*F1, *F2))
