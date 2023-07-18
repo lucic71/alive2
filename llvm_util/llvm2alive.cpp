@@ -1370,8 +1370,10 @@ public:
         continue;
 
       switch (llvmattr.getKindAsEnum()) {
+/*
       case llvm::Attribute::SExt: attrs.set(FnAttrs::SignExt); break;
       case llvm::Attribute::ZExt: attrs.set(FnAttrs::ZeroExt); break;
+*/
       case llvm::Attribute::NoAlias: attrs.set(FnAttrs::NoAlias); break;
       case llvm::Attribute::NonNull: attrs.set(FnAttrs::NonNull); break;
       case llvm::Attribute::NoUndef: attrs.set(FnAttrs::NoUndef); break;

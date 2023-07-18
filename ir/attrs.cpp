@@ -99,10 +99,12 @@ ostream& operator<<(ostream &os, const FnAttrs &attr) {
     os << " inaccessiblememonly";
   if (attr.has(FnAttrs::NullPointerIsValid))
     os << " null_pointer_is_valid";
+/*
   if (attr.has(FnAttrs::ZeroExt))
     os << " zeroext";
   if (attr.has(FnAttrs::SignExt))
     os << " signext";
+*/
   if (!attr.allocfamily.empty())
     os << " alloc-family(" << attr.allocfamily << ')';
   if (attr.allockind != 0) {
