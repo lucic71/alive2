@@ -4338,6 +4338,15 @@ vector<Value*> VaEnd::operands() const {
   return { ptr };
 }
 
+
+bool VaEnd::propagatesPoison() const {
+  return true;
+}
+
+bool VaEnd::hasSideEffects() const {
+  return true;
+}
+
 void VaEnd::rauw(const Value &what, Value &with) {
   RAUW(ptr);
 }
