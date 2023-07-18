@@ -223,6 +223,8 @@ space+ {
 "uge" { return UGE; }
 "ugt" { return UGT; }
 "call" { return CALL; }
+"noread" { return NOREAD; }
+"nowrite" { return NOWRITE; }
 "noreturn" { return NORETURN; }
 "willreturn" { return WILLRETURN; }
 "freeze" { return FREEZE; }
@@ -302,11 +304,6 @@ space+ {
 "nsz" { return NSZ; }
 "assume" { return ASSUME; }
 "unreachable" { return UNREACH; }
-"memory" { return MEMORY; }
-"read" { return READ; }
-"readwrite" { return READ; }
-"write" { return WRITE; }
-"none" { return NONE; }
 
 [a-zA-Z][a-zA-Z0-9]* {
   COPY_STR();

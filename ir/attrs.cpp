@@ -67,6 +67,12 @@ void FPDenormalAttrs::print(ostream &os, bool is_fp32) const {
 
 
 ostream& operator<<(ostream &os, const FnAttrs &attr) {
+  if (attr.has(FnAttrs::NoRead))
+    os << " noread";
+  if (attr.has(FnAttrs::NoWrite))
+    os << " nowrite";
+  if (attr.has(FnAttrs::ArgMemOnly))
+    os << " argmemonly";
   if (attr.has(FnAttrs::NNaN))
     os << " NNaN";
   if (attr.has(FnAttrs::NoReturn))
@@ -89,6 +95,8 @@ ostream& operator<<(ostream &os, const FnAttrs &attr) {
     os << " willreturn";
   if (attr.has(FnAttrs::DereferenceableOrNull))
     os << " dereferenceable_or_null(" << attr.derefOrNullBytes << ')';
+  if (attr.has(FnAttrs::InaccessibleMemOnly))
+    os << " inaccessiblememonly";
   if (attr.has(FnAttrs::NullPointerIsValid))
     os << " null_pointer_is_valid";
   if (attr.has(FnAttrs::ZeroExt))
@@ -125,155 +133,8 @@ ostream& operator<<(ostream &os, const FnAttrs &attr) {
   attr.fp_denormal.print(os);
   if (attr.fp_denormal32)
     attr.fp_denormal32->print(os, true);
-  return os << attr.mem;
+  return os;
 }
-
-
-// format ..rw..
-bool MemoryAccess::canRead(AccessType ty) const {
-  return (val >> (2 * ty)) & 2;
-}
-
-bool MemoryAccess::canWrite(AccessType ty) const {
-  return (val >> (2 * ty)) & 1;
-}
-
-bool MemoryAccess::canOnlyRead(AccessType ty) const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (i != ty && canRead(AccessType(i)))
-      return false;
-  }
-  return canRead(ty);
-}
-
-bool MemoryAccess::canOnlyWrite(AccessType ty) const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (i != ty && canWrite(AccessType(i)))
-      return false;
-  }
-  return canWrite(ty);
-}
-
-bool MemoryAccess::canReadAnything() const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (!canRead(AccessType(i)))
-      return false;
-  }
-  return true;
-}
-
-bool MemoryAccess::canWriteAnything() const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (!canWrite(AccessType(i)))
-      return false;
-  }
-  return true;
-}
-
-bool MemoryAccess::canReadSomething() const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (canRead(AccessType(i)))
-      return true;
-  }
-  return false;
-}
-
-bool MemoryAccess::canWriteSomething() const {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    if (canWrite(AccessType(i)))
-      return true;
-  }
-  return false;
-}
-
-void MemoryAccess::setFullAccess() {
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    setCanAlsoAccess(AccessType(i));
-  }
-}
-
-void MemoryAccess::setCanOnlyRead() {
-  setNoAccess();
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    setCanAlsoRead(AccessType(i));
-  }
-}
-
-void MemoryAccess::setCanOnlyWrite() {
-  setNoAccess();
-  for (unsigned i = 0; i < NumTypes; ++i) {
-    setCanOnlyWrite(AccessType(i));
-  }
-}
-
-void MemoryAccess::setCanOnlyRead(AccessType ty) {
-  setNoAccess();
-  setCanAlsoRead(ty);
-}
-
-void MemoryAccess::setCanOnlyWrite(AccessType ty) {
-  setNoAccess();
-  setCanAlsoWrite(ty);
-}
-
-void MemoryAccess::setCanOnlyAccess(AccessType ty) {
-  setCanOnlyRead(ty);
-  setCanAlsoWrite(ty);
-}
-
-void MemoryAccess::setCanAlsoRead(AccessType ty) {
-  val |= 2u << (ty * 2);
-}
-
-void MemoryAccess::setCanAlsoWrite(AccessType ty) {
-  val |= 1u << (ty * 2);
-}
-
-void MemoryAccess::setCanAlsoAccess(AccessType ty) {
-  setCanAlsoRead(ty);
-  setCanAlsoWrite(ty);
-}
-
-ostream& operator<<(ostream &os, const MemoryAccess &a) {
-  if (a.val == 0)
-    return os << " memory(none)";
-
-  if (a.canReadAnything())
-    return a.canWriteAnything() ? os : (os << " memory(read)");
-
-  if (a.canWriteAnything())
-    return os << " memory(write)";
-
-  array<const char*, 5> vals = {
-    "argmem",
-    "globals",
-    "inaccessiblemem",
-    "errno",
-    "other",
-  };
-  static_assert(vals.size() == MemoryAccess::NumTypes);
-
-  os << " memory(";
-
-  unsigned i = 0;
-  bool first = true;
-  for (auto *str : vals) {
-    auto ty = MemoryAccess::AccessType(i++);
-    if (a.canRead(ty)) {
-      if (!first) os << ", ";
-      os << str << (a.canWrite(ty) ? ": readwrite" : ": read");
-      first = false;
-    } else if (a.canWrite(ty)) {
-      if (!first) os << ", ";
-      os << str << ": write";
-      first = false;
-    }
-  }
-  assert(i == MemoryAccess::NumTypes);
-
-  return os << ')';
-}
-
 
 bool ParamAttrs::refinedBy(const ParamAttrs &other) const {
   // check attributes that are properties of the caller
@@ -380,11 +241,6 @@ StateValue ParamAttrs::encode(State &s, StateValue &&val, const Type &ty) const{
   return std::move(val);
 }
 
-
-void FnAttrs::inferImpliedAttributes() {
-  if (!mem.canWriteSomething())
-    set(NoFree);
-}
 
 pair<expr,expr>
 FnAttrs::computeAllocSize(State &s,

@@ -1,7 +1,7 @@
 declare void @llvm.sideeffect()
 
 define void @src() {
-  call void @llvm.sideeffect() memory(none)
+  call void @llvm.sideeffect() readnone
   ret void
 }
 

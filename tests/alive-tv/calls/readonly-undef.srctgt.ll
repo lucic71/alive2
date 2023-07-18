@@ -1,4 +1,4 @@
-declare i8 @func(i8) memory(read)
+declare i8 @func(i8) readonly
 
 define i8 @src() {
   %V1 = call i8 @func(i8 undef)

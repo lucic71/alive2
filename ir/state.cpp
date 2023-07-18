@@ -40,80 +40,44 @@ void State::ValueAnalysis::meet_with(const State::ValueAnalysis &other) {
   unused_vars = intersect_set(unused_vars, other.unused_vars);
 
   for (auto &[fn, pair] : other.ranges_fn_calls) {
-    auto &[calls, access] = pair;
+    auto &[calls, inaccessiblememonly] = pair;
     auto [I, inserted] = ranges_fn_calls.try_emplace(fn, pair);
     if (inserted) {
       I->second.first.emplace(0);
     } else {
+      assert(I->second.second == inaccessiblememonly);
       I->second.first.insert(calls.begin(), calls.end());
-      I->second.second |= access;
     }
   }
 
   for (auto &[fn, pair] : ranges_fn_calls) {
-    auto &[calls, access] = pair;
+    auto &[calls, inaccessiblememonly] = pair;
     if (!other.ranges_fn_calls.count(fn))
       calls.emplace(0);
   }
 }
 
-void State::ValueAnalysis::FnCallRanges::inc(const string &name,
-                                             MemoryAccess access) {
-  if (!access.canWriteSomething())
-    return;
-
+void State::ValueAnalysis::FnCallRanges::inc(const std::string &name,
+                                             bool inaccessible_or_args_memonly) {
   auto [I, inserted] = try_emplace(name);
   if (inserted) {
     I->second.first.emplace(1);
-    I->second.second = access;
+    I->second.second = inaccessible_or_args_memonly;
   } else {
     set<unsigned> new_set;
     for (unsigned n : I->second.first) {
       new_set.emplace(n+1);
     }
     I->second.first   = std::move(new_set);
-    I->second.second |= access;
+    I->second.second |= inaccessible_or_args_memonly;
   }
 }
 
 bool
-State::ValueAnalysis::FnCallRanges::overlaps(const string &callee,
-                                             MemoryAccess call_access,
-                                             const FnCallRanges &other) const {
-  if (!call_access.canReadSomething())
-    return true;
-
-  auto skip = [call_access, &callee](const auto &fn, MemoryAccess access) {
-    if (access.canOnlyWrite(MemoryAccess::Inaccessible)) {
-      // If this fn can only write to inaccessible memory, ignore if it's not
-      // our callee as callee can't read from that memory
-      if (fn != callee)
-        return true;
-
-      // If the trace only writes to inaccessible memory, but the callee can't
-      // read it, any mismatch in the number of calls is irrelevant
-      if (!call_access.canRead(MemoryAccess::Inaccessible))
-        return true;
-    }
-
-    if (call_access.canOnlyRead(MemoryAccess::Inaccessible) && fn == callee) {
-      if (!access.canWrite(MemoryAccess::Inaccessible))
-        return true;
-    }
-
-    // These may be calls that take allocas as arguments that aren't read by
-    // anyone else
-    if (access.canOnlyWrite(MemoryAccess::Args))
-      return true;
-
-    return false;
-  };
-
+State::ValueAnalysis::FnCallRanges::overlaps(const FnCallRanges &other) const {
   for (auto &[fn, pair] : *this) {
-    auto &[calls, access] = pair;
-    assert(access.canWriteSomething());
-
-    if (skip(fn, access))
+    auto &[calls, inaccessiblememonly] = pair;
+    if (inaccessiblememonly)
       continue;
 
     auto I = other.find(fn);
@@ -122,10 +86,7 @@ State::ValueAnalysis::FnCallRanges::overlaps(const string &callee,
         continue;
       return false;
     }
-
-    // A function that doesn't read anything, may write the same thing on
-    // every call. So a mismatch in the number of calls must be ignored.
-    if (!(access | I->second.second).canReadSomething())
+    if (I->second.second) // argmemonly
       continue;
 
     if (intersect_set(calls, I->second.first).empty())
@@ -133,8 +94,8 @@ State::ValueAnalysis::FnCallRanges::overlaps(const string &callee,
   }
 
   for (auto &[fn, pair] : other) {
-    auto &[calls, access] = pair;
-    if (skip(fn, access))
+    auto &[calls, inaccessiblememonly] = pair;
+    if (inaccessiblememonly)
       continue;
 
     if (!calls.count(0) && !count(fn))
@@ -150,7 +111,7 @@ State::ValueAnalysis::FnCallRanges::project(const string &name) const {
   if (I == end())
     return {};
   FnCallRanges ranges;
-  ranges.emplace(name, I->second);
+  ranges.emplace(name, make_pair(I->second.first, false));
   return ranges;
 }
 
@@ -759,10 +720,11 @@ void State::addNoReturn(const expr &cond) {
 }
 
 expr State::FnCallInput::operator==(const FnCallInput &rhs) const {
-  if (memaccess != rhs.memaccess ||
+  if (readsmem != rhs.readsmem ||
+      argmemonly != rhs.argmemonly ||
+      inaccessiblememonly != rhs.inaccessiblememonly ||
       noret != rhs.noret || willret != rhs.willret ||
-      (memaccess.canReadSomething() &&
-        (fncall_ranges != rhs.fncall_ranges || is_neq(m <=> rhs.m))))
+      (readsmem && (fncall_ranges != rhs.fncall_ranges || is_neq(m <=> rhs.m))))
     return false;
 
   AndExpr eq;
@@ -777,16 +739,16 @@ expr State::FnCallInput::operator==(const FnCallInput &rhs) const {
 }
 
 expr State::FnCallInput::refinedBy(
-  State &s, const string &callee, unsigned inaccessible_bid,
-  const vector<StateValue> &args_nonptr2,
+  State &s, unsigned modifies_bid, const vector<StateValue> &args_nonptr2,
   const vector<Memory::PtrInput> &args_ptr2,
   const ValueAnalysis::FnCallRanges &fncall_ranges2,
-  const Memory &m2, MemoryAccess memaccess2, bool noret2, bool willret2) const {
+  const Memory &m2, bool readsmem2, bool argmemonly2, bool inaccessiblememonly2,
+  bool noret2, bool willret2) const {
 
-  if (memaccess != memaccess2 ||
-      noret != noret2 ||
-      willret != willret2 ||
-      !fncall_ranges.overlaps(callee, memaccess2, fncall_ranges2))
+  if (readsmem != readsmem2 || argmemonly != argmemonly2 ||
+      inaccessiblememonly != inaccessiblememonly2 ||
+      noret != noret2 || willret != willret2 ||
+      (readsmem && !fncall_ranges.overlaps(fncall_ranges2)))
     return false;
 
   AndExpr refines;
@@ -801,39 +763,41 @@ expr State::FnCallInput::refinedBy(
     return false;
 
   set<expr> undef_vars;
-  assert(args_ptr.size() == args_ptr2.size());
-  for (unsigned i = 0, e = args_ptr.size(); i != e; ++i) {
-    auto &ptr1 = args_ptr[i];
-    auto &ptr2 = args_ptr2[i];
-    if (!ptr1.eq_attrs(ptr2))
-      return false;
+  if (!inaccessiblememonly) {
+    assert(args_ptr.size() == args_ptr2.size());
+    for (unsigned i = 0, e = args_ptr.size(); i != e; ++i) {
+      auto &ptr1 = args_ptr[i];
+      auto &ptr2 = args_ptr2[i];
+      if (!ptr1.eq_attrs(ptr2))
+        return false;
 
-    expr eq_val = Pointer(m, ptr1.val.value)
-                    .fninputRefined(Pointer(m2, ptr2.val.value),
-                                    undef_vars, ptr2.byval);
-    refines.add(ptr1.val.non_poison.implies(eq_val && ptr2.val.non_poison));
+      if (ptr1.noread)
+        continue;
 
-    if (!refines)
-      return false;
+      expr eq_val = Pointer(m, ptr1.val.value)
+                      .fninputRefined(Pointer(m2, ptr2.val.value),
+                                      undef_vars, ptr2.byval);
+      refines.add(ptr1.val.non_poison.implies(eq_val && ptr2.val.non_poison));
+
+      if (!refines)
+        return false;
+    }
   }
 
   for (auto &v : undef_vars)
     s.addFnQuantVar(v);
 
-  if (memaccess.canReadSomething()) {
-    bool argmemonly = memaccess.canOnlyRead(MemoryAccess::Args);
+  if (readsmem) {
     vector<Memory::PtrInput> dummy1, dummy2;
     auto restrict_ptrs = argmemonly ? &args_ptr : nullptr;
     auto restrict_ptrs2 = argmemonly ? &args_ptr2 : nullptr;
-    if (memaccess.canOnlyRead(MemoryAccess::Inaccessible)) {
-      assert(inaccessible_bid != -1u);
+    if (modifies_bid != -1u) {
       dummy1.emplace_back(
-        StateValue(Pointer(m, inaccessible_bid, false).release(), true), 0,
-        false, false, false);
+        StateValue(Pointer(m, modifies_bid, false).release(), true), 0, false,
+        false, false);
       dummy2.emplace_back(
-        StateValue(Pointer(m2, inaccessible_bid, false).release(), true), 0,
-        false, false, false);
-      assert(!restrict_ptrs && !restrict_ptrs2);
+        StateValue(Pointer(m2, modifies_bid, false).release(), true), 0, false,
+        false, false);
       restrict_ptrs = &dummy1;
       restrict_ptrs2 = &dummy2;
     }
@@ -877,6 +841,10 @@ vector<StateValue>
 State::addFnCall(const string &name, vector<StateValue> &&inputs,
                  vector<Memory::PtrInput> &&ptr_inputs,
                  const vector<Type*> &out_types, const FnAttrs &attrs) {
+  bool reads_memory = !attrs.has(FnAttrs::NoRead);
+  bool writes_memory = !attrs.has(FnAttrs::NoWrite);
+  bool argmemonly = attrs.has(FnAttrs::ArgMemOnly);
+  bool inaccessiblememonly = attrs.has(FnAttrs::InaccessibleMemOnly);
   bool noret = attrs.has(FnAttrs::NoReturn);
   bool willret = attrs.has(FnAttrs::WillReturn);
   bool noundef = attrs.has(FnAttrs::NoUndef);
@@ -894,9 +862,7 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     return vector<StateValue>(out_types.size());
   }
 
-  if (attrs.mem.canWrite(MemoryAccess::Args) ||
-      attrs.mem.canWrite(MemoryAccess::Inaccessible) ||
-      attrs.mem.canWrite(MemoryAccess::Other)) {
+  if (writes_memory) {
     for (auto &v : ptr_inputs) {
       if (!v.byval && !v.nocapture)
         memory.escapeLocalPtr(v.val.value, v.val.non_poison);
@@ -904,18 +870,15 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
   }
 
   vector<StateValue> retval;
-  unsigned inaccessible_bid = -1u;
-  if (attrs.mem.canOnlyRead(MemoryAccess::Inaccessible) ||
-      attrs.mem.canOnlyWrite(MemoryAccess::Inaccessible))
-    inaccessible_bid
+  unsigned modifies_bid = -1u;
+  if (inaccessiblememonly)
+    modifies_bid
       = inaccessiblemem_bids.try_emplace(name, inaccessiblemem_bids.size())
                             .first->second;
 
   State::ValueAnalysis::FnCallRanges call_ranges;
-  if (attrs.mem.canRead(MemoryAccess::Inaccessible) ||
-      attrs.mem.canRead(MemoryAccess::Errno) ||
-      attrs.mem.canRead(MemoryAccess::Other))
-    call_ranges = attrs.mem.canOnlyRead(MemoryAccess::Inaccessible)
+  if (reads_memory && !argmemonly)
+    call_ranges = inaccessiblememonly
                     ? analysis.ranges_fn_calls.project(name)
                     : analysis.ranges_fn_calls;
 
@@ -925,8 +888,8 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     auto call_data_pair
       = calls_fn.try_emplace(
           { std::move(inputs), std::move(ptr_inputs), std::move(call_ranges),
-            attrs.mem.canReadSomething() ? memory.dup() : Memory(*this),
-            attrs.mem, noret, willret });
+            reads_memory ? memory.dup() : Memory(*this),
+            reads_memory, argmemonly, inaccessiblememonly, noret, willret });
     auto &I = call_data_pair.first;
     bool inserted = call_data_pair.second;
 
@@ -957,10 +920,10 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
             (noret || willret)
               ? expr(noret)
               : expr::mkFreshVar((name + "#noreturn").c_str(), false),
-            attrs.mem.canWriteSomething()
+            writes_memory
               ? memory.mkCallState(name,
                                    attrs.has(FnAttrs::NoFree),
-                                   attrs.mem)
+                                   inaccessiblememonly)
               : Memory::CallState(), std::move(ret_data) };
 
       // add equality constraints between source's function calls
@@ -976,18 +939,19 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     addUB(I->second.ub);
     addNoReturn(I->second.noreturns);
     retval = I->second.retvals;
-    if (attrs.mem.canWriteSomething())
-      memory.setState(I->second.callstate, attrs.mem, I->first.args_ptr,
-                      inaccessible_bid);
+    if (writes_memory)
+      memory.setState(I->second.callstate,
+                      argmemonly ? &I->first.args_ptr : nullptr,
+                      modifies_bid);
   }
   else {
     // target: this fn call must match one from the source, otherwise it's UB
     ChoiceExpr<FnCallOutput> data;
 
     for (auto &[in, out] : fn_call_data[name]) {
-      auto refined = in.refinedBy(*this, name, inaccessible_bid, inputs,
-                                  ptr_inputs, call_ranges, memory, attrs.mem,
-                                  noret, willret);
+      auto refined = in.refinedBy(*this, modifies_bid, inputs, ptr_inputs,
+                                  call_ranges, memory, reads_memory, argmemonly,
+                                  inaccessiblememonly, noret, willret);
       data.add(out, std::move(refined));
     }
 
@@ -1013,8 +977,10 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
       } else
         retval = std::move(d.retvals);
 
-      if (attrs.mem.canWriteSomething())
-        memory.setState(d.callstate, attrs.mem, ptr_inputs, inaccessible_bid);
+      if (writes_memory)
+        memory.setState(d.callstate,
+                        argmemonly ? &ptr_inputs : nullptr,
+                        modifies_bid);
 
       fn_call_pre &= pre;
       if (qvar.isValid())
@@ -1027,7 +993,8 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     }
   }
 
-  analysis.ranges_fn_calls.inc(name, attrs.mem);
+  if (writes_memory)
+    analysis.ranges_fn_calls.inc(name, argmemonly | inaccessiblememonly);
 
   return retval;
 }

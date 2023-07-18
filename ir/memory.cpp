@@ -1416,7 +1416,8 @@ expr Memory::CallState::operator==(const CallState &rhs) const {
 }
 
 Memory::CallState
-Memory::mkCallState(const string &fnname, bool nofree, MemoryAccess access) {
+Memory::mkCallState(const string &fnname, bool nofree,
+                    bool inaccessiblememonly) {
   assert(has_fncall);
   CallState st;
   st.empty = false;
@@ -1425,7 +1426,7 @@ Memory::mkCallState(const string &fnname, bool nofree, MemoryAccess access) {
 
   auto blk_type = mk_block_val_array(1);
 
-  if (access.canOnlyWrite(MemoryAccess::Inaccessible)) {
+  if (inaccessiblememonly) {
     st.non_local_block_val.emplace_back(expr::mkFreshVar("blk_val", blk_type));
   } else {
     unsigned limit = num_nonlocals_src - num_inaccessiblememonly_fns;
@@ -1438,8 +1439,7 @@ Memory::mkCallState(const string &fnname, bool nofree, MemoryAccess access) {
   }
 
   st.non_local_liveness = mk_liveness_array();
-  if (num_nonlocals_src && !nofree &&
-      !access.canOnlyWrite(MemoryAccess::Inaccessible))
+  if (num_nonlocals_src && !nofree && !inaccessiblememonly)
     st.non_local_liveness
       = expr::mkFreshVar("blk_liveness", st.non_local_liveness);
 
@@ -1447,34 +1447,32 @@ Memory::mkCallState(const string &fnname, bool nofree, MemoryAccess access) {
 }
 
 void Memory::setState(const Memory::CallState &st,
-                      MemoryAccess access,
-                      const vector<PtrInput> &ptr_inputs,
-                      unsigned inaccessible_bid) {
+                      const vector<PtrInput> *ptr_inputs,
+                      unsigned modifies_bid) {
   assert(has_fncall);
 
   unsigned limit = num_nonlocals_src - num_inaccessiblememonly_fns;
 
   // 1) Havoc memory
 
-  if (access.canOnlyWrite(MemoryAccess::Inaccessible)) {
-    assert(inaccessible_bid != -1u);
+  // inaccessibleonly fncall
+  if (modifies_bid != -1u) {
     assert(st.non_local_block_val.size() == 1);
     unsigned bid
-      = num_nonlocals_src - num_inaccessiblememonly_fns + inaccessible_bid;
+      = num_nonlocals_src - num_inaccessiblememonly_fns + modifies_bid;
     assert(bid < num_nonlocals_src);
     assert(non_local_block_val[bid].undef.empty());
     non_local_block_val[bid].val = st.non_local_block_val[0];
   }
-
-  if (access.canWrite(MemoryAccess::Args) &&
-     !access.canOnlyWrite(MemoryAccess::Other)) {
+  // argmemonly fncall
+  else if (ptr_inputs) {
     unsigned idx = 0;
     for (unsigned bid = 0; bid < limit - has_write_fncall; ++bid) {
       if (always_nowrite(bid, true, true))
         continue;
 
       expr modifies(false);
-      for (auto &ptr_in : ptr_inputs) {
+      for (auto &ptr_in : *ptr_inputs) {
         if (ptr_in.nowrite)
           continue;
 
@@ -1491,13 +1489,9 @@ void Memory::setState(const Memory::CallState &st,
         non_local_block_val[bid].undef.clear();
     }
     assert(idx == st.non_local_block_val.size() - has_write_fncall);
-  }
 
-  if (access.canWrite(MemoryAccess::Errno)) {
-    // TODO
-   }
-
-  if (access.canWrite(MemoryAccess::Other)) {
+  // generic fncall
+  } else {
     unsigned idx = 0;
     for (unsigned bid = 0; bid < limit; ++bid) {
       if (always_nowrite(bid, true, true))
@@ -1514,9 +1508,9 @@ void Memory::setState(const Memory::CallState &st,
     expr mask = always_nowrite(0) ? one : zero;
     for (unsigned bid = always_nowrite(0); bid < num_nonlocals; ++bid) {
       expr may_free = true;
-      if (!access.canWrite(MemoryAccess::Other)) {
+      if (ptr_inputs) {
         may_free = false;
-        for (auto &ptr_in : ptr_inputs) {
+        for (auto &ptr_in : *ptr_inputs) {
           if (!ptr_in.byval && bid < next_nonlocal_bid)
             may_free |= ptr_in.val.non_poison &&
                         Pointer(*this, ptr_in.val.value).getBid() == bid;

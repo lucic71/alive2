@@ -2,15 +2,15 @@
 @y = constant i8 1
 
 define void @src() {
-  call void @f(ptr @x)
-  call void @f(ptr @y)
+  call void @f(i8* @x)
+  call void @f(i8* @y)
   ret void
 }
 
 define void @tgt() {
-  call void @f(ptr @y)
-  call void @f(ptr @x)
+  call void @f(i8* @y)
+  call void @f(i8* @x)
   ret void
 }
 
-declare void @f(ptr) memory(argmem: readwrite) willreturn
+declare void @f(i8*) argmemonly willreturn

@@ -14,7 +14,6 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/Operator.h"
-#include "llvm/Support/ModRef.h"
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -1034,7 +1033,6 @@ public:
     case llvm::Intrinsic::experimental_constrained_fptosi:
     case llvm::Intrinsic::experimental_constrained_fptoui:
     case llvm::Intrinsic::experimental_constrained_fpext:
-    case llvm::Intrinsic::fptrunc_round:
     case llvm::Intrinsic::experimental_constrained_fptrunc:
     case llvm::Intrinsic::lrint:
     case llvm::Intrinsic::experimental_constrained_lrint:
@@ -1053,7 +1051,6 @@ public:
       case llvm::Intrinsic::experimental_constrained_fptosi:  op = FpConversionOp::FPToSInt; break;
       case llvm::Intrinsic::experimental_constrained_fptoui:  op = FpConversionOp::FPToUInt; break;
       case llvm::Intrinsic::experimental_constrained_fpext:   op = FpConversionOp::FPExt; break;
-      case llvm::Intrinsic::fptrunc_round:
       case llvm::Intrinsic::experimental_constrained_fptrunc: op = FpConversionOp::FPTrunc; break;
       case llvm::Intrinsic::lrint:
       case llvm::Intrinsic::experimental_constrained_lrint:
@@ -1065,15 +1062,9 @@ public:
       case llvm::Intrinsic::experimental_constrained_llround: op = FpConversionOp::LRound; break;
       default: UNREACHABLE();
       }
-      FnAttrs attrs;
-      parse_fn_attrs(i, attrs);
-      unsigned flags = FpConversionOp::None;
-      if (attrs.has(FnAttrs::NoUndef))
-        flags |= FpConversionOp::NoUndef;
       RETURN_IDENTIFIER(make_unique<FpConversionOp>(*ty, value_name(i), *val,
                                                     op, parse_rounding(i),
-                                                    parse_exceptions(i),
-                                                    flags));
+                                                    parse_exceptions(i)));
     }
     case llvm::Intrinsic::is_fpclass:
     {
@@ -1108,6 +1099,7 @@ public:
     case llvm::Intrinsic::sideeffect: {
       FnAttrs attrs;
       parse_fn_attrs(i, attrs);
+      attrs.set(FnAttrs::InaccessibleMemOnly);
       attrs.set(FnAttrs::WillReturn);
       attrs.set(FnAttrs::NoThrow);
       return
@@ -1134,6 +1126,7 @@ public:
     }
 
     // do nothing intrinsics
+    case llvm::Intrinsic::dbg_addr:
     case llvm::Intrinsic::dbg_declare:
     case llvm::Intrinsic::dbg_label:
     case llvm::Intrinsic::dbg_value:
@@ -1442,6 +1435,21 @@ public:
         continue;
 
       switch (llvmattr.getKindAsEnum()) {
+      case llvm::Attribute::ReadOnly:
+        attrs.set(FnAttrs::NoWrite);
+        attrs.set(FnAttrs::NoFree);
+        break;
+
+      case llvm::Attribute::ReadNone:
+        attrs.set(FnAttrs::NoRead);
+        attrs.set(FnAttrs::NoWrite);
+        attrs.set(FnAttrs::NoFree);
+        break;
+
+      case llvm::Attribute::WriteOnly:
+        attrs.set(FnAttrs::NoRead);
+        break;
+
       case llvm::Attribute::NoFree:
         attrs.set(FnAttrs::NoFree);
         break;
@@ -1489,30 +1497,6 @@ public:
     }
   }
 
-  MemoryAccess handleMemAttrs(const llvm::MemoryEffects &e) {
-    MemoryAccess attrs;
-    attrs.setNoAccess();
-
-    array<pair<llvm::IRMemLocation, MemoryAccess::AccessType>, 5> tys
-    {
-      make_pair(llvm::IRMemLocation::ArgMem,          MemoryAccess::Args),
-      make_pair(llvm::IRMemLocation::InaccessibleMem,
-                MemoryAccess::Inaccessible),
-      make_pair(llvm::IRMemLocation::Other,           MemoryAccess::Other),
-      make_pair(llvm::IRMemLocation::Other,           MemoryAccess::Globals),
-      make_pair(llvm::IRMemLocation::Other,           MemoryAccess::Errno),
-    };
-
-    for (auto &[ef, ty] : tys) {
-      auto modref = e.getModRef(ef);
-      if (isModSet(modref))
-        attrs.setCanAlsoWrite(ty);
-      if (isRefSet(modref))
-        attrs.setCanAlsoRead(ty);
-    }
-    return attrs;
-  }
-
   void parse_fn_attrs(const llvm::CallInst &i, FnAttrs &attrs) {
     auto fn = i.getCalledFunction();
     llvm::AttributeList attrs_callsite = i.getAttributes();
@@ -1525,10 +1509,6 @@ public:
     handleRetAttrs(attrs_fndef.getAttributes(ret), attrs);
     handleFnAttrs(attrs_callsite.getAttributes(fnidx), attrs);
     handleFnAttrs(attrs_fndef.getAttributes(fnidx), attrs);
-    attrs.mem = handleMemAttrs(i.getMemoryEffects());
-    if (fn)
-      attrs.mem &= handleMemAttrs(fn->getMemoryEffects());
-    attrs.inferImpliedAttributes();
   }
 
 
@@ -1597,8 +1577,6 @@ public:
     const auto &fnidx = llvm::AttributeList::FunctionIndex;
     handleRetAttrs(attrlist.getAttributes(ridx), attrs);
     handleFnAttrs(attrlist.getAttributes(fnidx), attrs);
-    attrs.mem = handleMemAttrs(f.getMemoryEffects());
-    attrs.inferImpliedAttributes();
 
     // create all BBs upfront in topological order
     vector<pair<BasicBlock*, llvm::BasicBlock*>> sorted_bbs;

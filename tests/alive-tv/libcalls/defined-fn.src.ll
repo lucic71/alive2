@@ -1,3 +1,3 @@
-define ptr @calloc(i64 %nmeb, i64 %sz) memory(inaccessiblemem: readwrite) {
+define ptr @calloc(i64 %nmeb, i64 %sz) inaccessiblememonly {
   ret ptr null
 }

@@ -1,13 +1,13 @@
 @x = constant i8 0
 
 define void @src() {
-  call void @f(ptr @x)
+  call void @f(i8* @x)
   ret void
 }
 
-define void @tgt() memory(none) {
-  call void @f(ptr @x)
+define void @tgt() readnone {
+  call void @f(i8* @x)
   ret void
 }
 
-declare void @f(ptr) memory(argmem: readwrite)
+declare void @f(i8*) argmemonly

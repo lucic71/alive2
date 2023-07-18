@@ -100,6 +100,11 @@ uint64_t getGlobalVarSize(const IR::Value *V) {
 
 namespace IR {
 
+bool Instr::propagatesPoison() const {
+  // be on the safe side
+  return false;
+}
+
 expr Instr::getTypeConstraints() const {
   UNREACHABLE();
   return {};
@@ -1467,6 +1472,7 @@ StateValue TestOp::toSMT(State &s) const {
       auto *fpty = ty.getAsFloatType();
       auto a = fpty->getFloat(v);
       OrExpr result;
+      // TODO: distinguish between quiet and signaling NaNs
       if (n & (1 << 0))
         result.add(fpty->isNaN(v, true));
       if (n & (1 << 1))
@@ -2251,23 +2257,12 @@ static expr ptr_only_args(State &s, const Pointer &p) {
 
 static void check_can_load(State &s, const expr &p0) {
   auto &attrs = s.getFn().getFnAttrs();
-  if (attrs.mem.canReadAnything())
-    return;
-
   Pointer p(s.getMemory(), p0);
-  expr readable = p.isLocal() ||
-                  p.isConstGlobal() ||
-                  attrs.mem.canRead(MemoryAccess::Other);
-  expr nonreadable = false;
 
-  (attrs.mem.canRead(MemoryAccess::Globals) ? readable : nonreadable)
-    |= p.isWritableGlobal();
-
-  (attrs.mem.canRead(MemoryAccess::Args) ? readable : nonreadable)
-    |= ptr_only_args(s, p);
-
-  s.addUB(std::move(readable));
-  s.addUB(!nonreadable);
+  if (attrs.has(FnAttrs::NoRead))
+    s.addUB(p.isLocal() || p.isConstGlobal());
+  else if (attrs.has(FnAttrs::ArgMemOnly))
+    s.addUB(p.isLocal() || ptr_only_args(s, p));
 }
 
 static void check_can_store(State &s, const expr &p0) {
@@ -2275,31 +2270,24 @@ static void check_can_store(State &s, const expr &p0) {
     return;
 
   auto &attrs = s.getFn().getFnAttrs();
-  if (attrs.mem.canWriteAnything())
-    return;
-
   Pointer p(s.getMemory(), p0);
-  expr writable    = p.isLocal() || attrs.mem.canWrite(MemoryAccess::Other);
-  expr nonwritable = false;
 
-  (attrs.mem.canWrite(MemoryAccess::Globals) ? writable : nonwritable)
-    |= p.isWritableGlobal();
-
-  (attrs.mem.canWrite(MemoryAccess::Args) ? writable : nonwritable)
-    |= ptr_only_args(s, p);
-
-  s.addUB(std::move(writable));
-  s.addUB(!nonwritable);
+  if (attrs.has(FnAttrs::NoWrite))
+    s.addUB(p.isLocal());
+  else if (attrs.has(FnAttrs::ArgMemOnly))
+    s.addUB(p.isLocal() || ptr_only_args(s, p));
 }
 
 static void unpack_inputs(State &s, Value &argv, Type &ty,
-                          const ParamAttrs &argflag, StateValue value,
-                          StateValue value2, vector<StateValue> &inputs,
+                          const ParamAttrs &argflag, bool argmemonly,
+                          StateValue value, StateValue value2,
+                          vector<StateValue> &inputs,
                           vector<Memory::PtrInput> &ptr_inputs) {
   if (auto agg = ty.getAsAggregateType()) {
     for (unsigned i = 0, e = agg->numElementsConst(); i != e; ++i) {
-      unpack_inputs(s, argv, agg->getChild(i), argflag, agg->extract(value, i),
-                    agg->extract(value2, i), inputs, ptr_inputs);
+      unpack_inputs(s, argv, agg->getChild(i), argflag, argmemonly,
+                    agg->extract(value, i), agg->extract(value2, i), inputs,
+                    ptr_inputs);
     }
     return;
   }
@@ -2308,6 +2296,10 @@ static void unpack_inputs(State &s, Value &argv, Type &ty,
     value = argflag.encode(s, std::move(value), ty);
 
     if (ty.isPtrType()) {
+      if (argmemonly)
+        value.non_poison
+          &= ptr_only_args(s, Pointer(s.getMemory(), value.value));
+
       ptr_inputs.emplace_back(std::move(value),
                               argflag.blockSize,
                               argflag.has(ParamAttrs::NoRead),
@@ -2368,6 +2360,8 @@ StateValue FnCall::toSMT(State &s) const {
   vector<StateValue> inputs;
   vector<Memory::PtrInput> ptr_inputs;
   vector<Type*> out_types;
+  bool argmemonly_fn   = s.getFn().getFnAttrs().has(FnAttrs::ArgMemOnly);
+  bool argmemonly_call = hasAttribute(FnAttrs::ArgMemOnly);
 
   ostringstream fnName_mangled;
   fnName_mangled << fnName;
@@ -2386,16 +2380,47 @@ StateValue FnCall::toSMT(State &s) const {
       sv2 = s.eval(*arg, true);
     }
 
-    unpack_inputs(s, *arg, arg->getType(), flags, std::move(sv), std::move(sv2),
-                  inputs, ptr_inputs);
+    unpack_inputs(s, *arg, arg->getType(), flags, argmemonly_fn, std::move(sv),
+                  std::move(sv2), inputs, ptr_inputs);
     fnName_mangled << '#' << arg->getType();
   }
   fnName_mangled << '!' << getType();
   if (!isVoid())
     unpack_ret_ty(out_types, getType());
 
+  auto check = [&](FnAttrs::Attribute attr) {
+    return s.getFn().getFnAttrs().has(attr) && !hasAttribute(attr);
+  };
+
+  auto check_implies = [&](FnAttrs::Attribute attr) {
+    if (!check(attr))
+      return;
+
+    if (argmemonly_call) {
+      for (auto &p : ptr_inputs) {
+        if (!p.byval) {
+          Pointer ptr(m, p.val.value);
+          s.addUB(p.val.non_poison.implies(
+                    ptr.isLocal() || ptr.isConstGlobal()));
+        }
+      }
+    } else {
+      s.addUB(expr(false));
+    }
+  };
+
+  check_implies(FnAttrs::NoRead);
+  check_implies(FnAttrs::NoWrite);
+
   // Check attributes that calles must have if caller has them
-  if (!attrs.refinedBy(s.getFn().getFnAttrs()))
+  if (check(FnAttrs::ArgMemOnly) ||
+      check(FnAttrs::NoThrow) ||
+      check(FnAttrs::WillReturn) ||
+      check(FnAttrs::InaccessibleMemOnly))
+    s.addUB(expr(false));
+
+  // can't have both!
+  if (attrs.has(FnAttrs::ArgMemOnly) && attrs.has(FnAttrs::InaccessibleMemOnly))
     s.addUB(expr(false));
 
   auto get_alloc_ptr = [&]() -> Value& {
@@ -2465,6 +2490,8 @@ StateValue FnCall::toSMT(State &s) const {
     assert(isVoid());
     return {};
   }
+
+  check_implies(FnAttrs::NoFree);
 
   unsigned idx = 0;
   auto ret = s.addFnCall(fnName_mangled.str(), std::move(inputs),
@@ -3628,11 +3655,9 @@ StateValue GEP::toSMT(State &s) const {
                     vector<pair<uint64_t, StateValue>> &offsets) -> StateValue {
     Pointer ptr(s.getMemory(), ptrval.value);
     AndExpr non_poison(ptrval.non_poison);
-    AndExpr inbounds_np;
-    AndExpr idx_all_zeros;
 
     if (inbounds)
-      inbounds_np.add(ptr.inbounds());
+      non_poison.add(ptr.inbounds(true));
 
     for (auto &[sz, idx] : offsets) {
       auto &[v, np] = idx;
@@ -4310,14 +4335,6 @@ vector<Value*> VaEnd::operands() const {
   return { ptr };
 }
 
-bool VaEnd::propagatesPoison() const {
-  return true;
-}
-
-bool VaEnd::hasSideEffects() const {
-  return true;
-}
-
 void VaEnd::rauw(const Value &what, Value &with) {
   RAUW(ptr);
 }
@@ -4352,7 +4369,7 @@ static void ensure_varargs_ptr(D &data, State &s, const expr &arg_ptr) {
 
 StateValue VaEnd::toSMT(State &s) const {
   auto &data  = s.getVarArgsData();
-  auto &raw_p = s.getWellDefinedPtr(*ptr);
+  auto &raw_p = s.getAndAddPoisonUB(*ptr, true).value;
 
   s.addUB(Pointer(s.getMemory(), raw_p).isBlockAlive());
 

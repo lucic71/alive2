@@ -5,7 +5,7 @@ define void @src() {
 
 define void @tgt() {
 ; trap and any readnone noreturn function should not be considered equivalent
-  call void @plain_fn() noreturn memory(none)
+  call void @plain_fn() noreturn readnone
   unreachable
 }
 
