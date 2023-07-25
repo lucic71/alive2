@@ -96,17 +96,6 @@ string_view s(llvm::StringRef str) {
     return ret;                    \
   } while (0)
 
-#define RETURN_IDENTIFIER_FNATTRS(op, attrs)                 \
-  do {                                                       \
-    auto ret = op;                                           \
-    add_identifier(i, *ret.get());                           \
-    if (attrs.has(FnAttrs::NoUndef)) {                       \
-      auto &ptr = *ret;                                      \
-      BB->addInstr(std::move(ret));                          \
-      return make_unique<Assume>(ptr, Assume::WellDefined);  \
-    }                                                        \
-    return ret;                                              \
-  } while (0)
 
 
 class llvm2alive_ : public llvm::InstVisitor<llvm2alive_, unique_ptr<Instr>> {
@@ -864,8 +853,11 @@ public:
       }
       FnAttrs attrs;
       parse_fn_attrs(i, attrs);
-      RETURN_IDENTIFIER_FNATTRS(
-        make_unique<BinOp>(*ty, value_name(i), *a, *b, op), attrs);
+      unsigned flags = BinOp::None;
+      if (attrs.has(FnAttrs::NoUndef))
+        flags |= BinOp::NoUndef;
+      RETURN_IDENTIFIER(make_unique<BinOp>(*ty, value_name(i), *a, *b, op,
+                                           flags));
     }
     case llvm::Intrinsic::bitreverse:
     case llvm::Intrinsic::bswap:
@@ -1075,10 +1067,13 @@ public:
       }
       FnAttrs attrs;
       parse_fn_attrs(i, attrs);
-      RETURN_IDENTIFIER_FNATTRS(
-        make_unique<FpConversionOp>(*ty, value_name(i), *val, op,
-                                    parse_rounding(i), parse_exceptions(i)),
-        attrs);
+      unsigned flags = FpConversionOp::None;
+      if (attrs.has(FnAttrs::NoUndef))
+        flags |= FpConversionOp::NoUndef;
+      RETURN_IDENTIFIER(make_unique<FpConversionOp>(*ty, value_name(i), *val,
+                                                    op, parse_rounding(i),
+                                                    parse_exceptions(i),
+                                                    flags));
     }
     case llvm::Intrinsic::is_fpclass:
     {
@@ -1358,11 +1353,6 @@ public:
         attrs.set(ParamAttrs::NoUndef);
         break;
 
-      case llvm::Attribute::NoFPClass:
-        attrs.set(ParamAttrs::NoFPClass);
-        attrs.nofpclass = (uint16_t)llvmattr.getNoFPClass();
-        break;
-
       case llvm::Attribute::Returned:
         attrs.set(ParamAttrs::Returned);
         break;
@@ -1412,11 +1402,6 @@ public:
       case llvm::Attribute::Alignment:
         attrs.set(FnAttrs::Align);
         attrs.align = max(attrs.align, llvmattr.getAlignment()->value());
-        break;
-
-      case llvm::Attribute::NoFPClass:
-        attrs.set(FnAttrs::NoFPClass);
-        attrs.nofpclass = (uint16_t)llvmattr.getNoFPClass();
         break;
 
       default: break;
