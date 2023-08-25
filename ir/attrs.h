@@ -80,9 +80,6 @@ public:
   // Returns true if it's UB for the argument to be poison / have a poison elem.
   bool poisonImpliesUB() const;
 
-  // Returns true if it is UB for the argument to be (partially) undef.
-  bool undefImpliesUB() const;
-
   uint64_t getDerefBytes() const;
 
   void merge(const ParamAttrs &other);
@@ -134,7 +131,7 @@ public:
 
   uint64_t derefBytes = 0;       // Dereferenceable
   uint64_t derefOrNullBytes = 0; // DereferenceableOrNull
-  uint64_t align = 0;
+  uint64_t align = 1;
 
   unsigned allocsize_0 = 0;      // AllocSize
   unsigned allocsize_1 = -1u;    // AllocSize
@@ -157,9 +154,6 @@ public:
 
   // Returns true if returning poison or an aggregate having a poison is UB
   bool poisonImpliesUB() const;
-
-  // Returns true if returning (partially) undef is UB
-  bool undefImpliesUB() const;
 
   void setFPDenormal(FPDenormalAttrs attr, unsigned bits = 0);
   FPDenormalAttrs getFPDenormal(const Type &ty) const;

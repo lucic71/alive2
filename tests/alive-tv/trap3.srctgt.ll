@@ -1,15 +1,13 @@
-define void @src(i8* %ptr) {
-  store i8 0, i8* %ptr
+define void @src(ptr %ptr) {
+  store i8 0, ptr %ptr
   call void @llvm.trap()
   unreachable
 }
 
-define void @tgt(i8* %ptr) {
-  store i8 1, i8* %ptr
+define void @tgt(ptr %ptr) {
+  store i8 1, ptr %ptr
   call void @llvm.trap()
   unreachable
 }
 
 declare void @llvm.trap()
-
-; ERROR: Source is more defined than target

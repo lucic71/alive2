@@ -109,17 +109,13 @@ private:
   smt::AndExpr precondition;
   smt::AndExpr axioms;
 
-  // for -disallow-ub-exploitation
-  smt::OrExpr unreachable_paths;
-
   std::set<std::pair<std::string,std::optional<smt::expr>>> used_approximations;
 
   std::set<smt::expr> quantified_vars;
   std::set<smt::expr> nondet_vars;
 
   // var -> ((value, not_poison), ub, undef_vars)
-  std::unordered_map<const Value*, unsigned> values_map;
-  std::vector<std::pair<const Value*, ValTy>> values;
+  std::unordered_map<const Value*, ValTy> values;
 
   // dst BB -> src BB -> BasicBlockInfo
   std::unordered_map<const BasicBlock*,
@@ -212,8 +208,12 @@ public:
   const StateValue& getVal(const Value &val, bool is_poison_ub);
   const smt::expr& getWellDefinedPtr(const Value &val);
 
-  const ValTy& at(const Value &val) const;
+  const ValTy* at(const Value &val) const;
   bool isUndef(const smt::expr &e) const;
+
+  // only used by alive-exec to support execution of the same BB multiple times
+  void cleanup(const Value &val);
+  void cleanupPredecessorData();
 
   /*--- Control flow ---*/
   const smt::OrExpr* jumpCondFrom(const BasicBlock &bb) const;
@@ -239,7 +239,6 @@ public:
   void addUB(smt::AndExpr &&ubs);
   void addGuardableUB(smt::expr &&ub);
 
-  void addUnreachable();
   void addNoReturn(const smt::expr &cond);
   bool isViablePath() const { return domain.UB; }
 
@@ -276,8 +275,6 @@ public:
   auto& getAxioms() const { return axioms; }
   auto& getPre() const { return precondition; }
   auto& getFnPre() const { return fn_call_pre; }
-  auto& getUnreachable() const { return unreachable_paths; }
-  const auto& getValues() const { return values; }
   const auto& getQuantVars() const { return quantified_vars; }
   const auto& getNondetVars() const { return nondet_vars; }
   const auto& getFnQuantVars() const { return fn_call_qvars; }
