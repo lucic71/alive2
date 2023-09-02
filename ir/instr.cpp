@@ -2430,9 +2430,10 @@ StateValue FnCall::toSMT(State &s) const {
   if (!isVoid())
     unpack_ret_ty(out_types, getType());
 
-  // Check attributes that calles must have if caller has them
-  if (!attrs.refinedBy(s.getFn().getFnAttrs()))
-    s.addUB(expr(false));
+  // Callee must return if caller must return
+  if (s.getFn().getFnAttrs().has(FnAttrs::WillReturn) &&
+      !attrs.has(FnAttrs::WillReturn))
+    s.addGuardableUB(expr(false));
 
   auto get_alloc_ptr = [&]() -> Value& {
     for (auto &[arg, flags] : args) {
@@ -3711,7 +3712,12 @@ StateValue GEP::toSMT(State &s) const {
 
     if (inbounds) {
       auto all_zeros = idx_all_zeros();
-      non_poison.add(all_zeros || inbounds_np());
+      auto inbounds_cond = all_zeros || inbounds_np();
+
+      if (config::disallow_ub_exploitation)
+        s.addGuardableUB(non_poison().implies(inbounds_cond));
+      else
+        non_poison.add(std::move(inbounds_cond));
 
       // try to simplify the pointer
       if (all_zeros.isFalse())
