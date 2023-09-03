@@ -3242,6 +3242,8 @@ StateValue Assume::toSMT(State &s) const {
   switch (kind) {
   case AndNonPoison: {
     auto &v = s.getAndAddPoisonUB(*args[0]);
+    if (config::disallow_ub_exploitation && v.value.isZero())
+      s.addUnreachable();
     s.addGuardableUB(v.value != 0);
     break;
   }
