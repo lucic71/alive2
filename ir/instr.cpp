@@ -2111,11 +2111,13 @@ unique_ptr<Instr> InsertValue::dup(Function &f, const string &suffix) const {
 
 DEFINE_AS_RETZERO(FnCall, getMaxGEPOffset);
 
-FnCall::FnCall(Type &type, string &&name, string &&fnName, FnAttrs &&attrs)
-  : MemInstr(type, std::move(name)), fnName(std::move(fnName)),
+FnCall::FnCall(Type &type, string &&name, string &&fnName, FnAttrs &&attrs,
+               Value *fnptr)
+  : MemInstr(type, std::move(name)), fnName(std::move(fnName)), fnptr(fnptr),
     attrs(std::move(attrs)) {
   if (config::disallow_ub_exploitation)
     this->attrs.set(FnAttrs::NoUndef);
+  assert(!fnptr || this->fnName.empty());
 }
 
 pair<uint64_t, uint64_t> FnCall::getMaxAllocSize() const {
@@ -2230,6 +2232,8 @@ void FnCall::addArg(Value &arg, ParamAttrs &&attrs) {
 
 vector<Value*> FnCall::operands() const {
   vector<Value*> output;
+  if (fnptr)
+    output.emplace_back(fnptr);
   transform(args.begin(), args.end(), back_inserter(output),
             [](auto &p){ return p.first; });
   return output;
@@ -2240,6 +2244,7 @@ bool FnCall::propagatesPoison() const {
 }
 
 void FnCall::rauw(const Value &what, Value &with) {
+  RAUW(fnptr);
   for (auto &arg : args) {
     RAUW(arg.first);
   }
@@ -2249,7 +2254,8 @@ void FnCall::print(ostream &os) const {
   if (!isVoid())
     os << getName() << " = ";
 
-  os << "call " << print_type(getType()) << fnName << '(';
+  os << "call " << print_type(getType())
+     << (fnptr ? fnptr->getName() : fnName) << '(';
 
   bool first = true;
   for (auto &[arg, attrs] : args) {
@@ -2408,8 +2414,20 @@ StateValue FnCall::toSMT(State &s) const {
   vector<Memory::PtrInput> ptr_inputs;
   vector<Type*> out_types;
 
+  auto ptr = fnptr;
+  // This is a direct call, but check if there are indirect calls elsewhere
+  // to this function. If so, call it indirectly to match the other calls.
+  if (!ptr)
+    ptr = s.getFn().getConstant(string_view(fnName).substr(1));
+
   ostringstream fnName_mangled;
-  fnName_mangled << fnName;
+  if (ptr) {
+    fnName_mangled << "#indirect_call";
+    inputs.emplace_back(s.getAndAddPoisonUB(*ptr, true));
+  } else {
+    fnName_mangled << fnName;
+  }
+
   for (auto &[arg, flags] : args) {
     // we duplicate each argument so that undef values are allowed to take
     // different values so we can catch the bug in f(freeze(undef)) -> f(undef)
@@ -2513,12 +2531,15 @@ StateValue FnCall::toSMT(State &s) const {
 
 expr FnCall::getTypeConstraints(const Function &f) const {
   // TODO : also need to name each arg type smt var uniquely
-  return Value::getTypeConstraints();
+  expr ret = Value::getTypeConstraints();
+  if (fnptr)
+    ret &= fnptr->getType().enforcePtrType();
+  return ret;
 }
 
 unique_ptr<Instr> FnCall::dup(Function &f, const string &suffix) const {
   auto r = make_unique<FnCall>(getType(), getName() + suffix, string(fnName),
-                               FnAttrs(attrs));
+                               FnAttrs(attrs), fnptr);
   r->args = args;
   r->approx = approx;
   return r;
